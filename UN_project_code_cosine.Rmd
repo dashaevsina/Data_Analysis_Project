@@ -1,0 +1,339 @@
+---
+title: "Data Analysis Project code"
+subtitle: UN data clustering analysis
+output:
+  word_document: default
+  html_notebook: default
+  html_document:
+    df_print: paged
+---
+
+# Libraries
+Load necessary libraries.
+
+```{r}
+library(pdftools)
+library(tidyverse)
+
+library(tm)
+
+library(ggplot2)
+library(lsa)
+
+library(wordcloud)
+
+library(magrittr)
+library(dplyr)
+library(ggpubr)
+
+library(proxy)
+
+library(cluster)
+library(dendextend)
+
+library(tidytext)
+library(topicmodels)
+```
+
+
+# Create a vector
+Create a vector data structure in R of the UN PDF file names using the `list.files` function. 
+```{r}
+all_files <- list.files(pattern = "pdf$", ignore.case=TRUE)
+all_files 
+
+typeof(all_files)
+```
+
+In the `pdftools` library, the function pdf_text is used to extract text. Using the `lapply` function, the pdf_text function can be applied to each element in the “all_files” vector to then create an object called “UN_files”.
+```{r}
+UN_files <- lapply(all_files, pdf_text)
+```
+
+This creates a list object with a specific number of elements, one for each document. The `length` function verifies it contains xyz elements:
+```{r}
+length(UN_files)
+```
+
+Thus, each element is a vector that contains the text of the PDF file. The length of each vector corresponds to the number of pages in the PDF file. For example, the first vector has length xyz because the first PDF file has xyz pages. The `length` function can be applied to each element to see this:
+```{r}
+lapply(UN_files, length) 
+```
+
+
+
+# Text mining
+
+Load the `tm package` and then create a corpus, which is essentially a database for the UN texts. 
+```{r}
+UN_corpus <- Corpus(URISource(all_files),
+               readerControl = list(reader = readPDF))
+```
+
+## Term-document matrix
+Having created a corpus called `UN_corpus`, a term-document matrix (TDM) can be generated, which stores counts of terms for each document. First, the punctuation marks have to be removed. 
+```{r}
+UN_corpus <- tm_map(UN_corpus, removePunctuation, ucp = TRUE)
+```
+
+The `tm package` includes a function to create a TDM called `TermDocumentMatrix`. NB: no stemming is applied.
+```{r}
+UN_corpus.tdm <- TermDocumentMatrix(UN_corpus, 
+                                   control = 
+                                     list(stopwords = TRUE,
+                                          tolower = TRUE,
+                                          stemming = TRUE,
+                                          removeNumbers = TRUE,
+                                          bounds = list(global = c(3, Inf))))
+```
+
+Inspect the UN_corpus term-document matrix:
+```{r}
+inspect(UN_corpus.tdm[1:10,]) 
+```
+
+### Summary statistics
+There are a few functions for summary statistics in the `tm package`. For instance, the `findFreqTerms` function can find frequently occurring terms. Words that occur at least 100 times are shown here:
+```{r}
+findFreqTerms(UN_corpus.tdm, lowfreq = 100, highfreq = Inf)
+```
+
+The counts of these words can be shown in each of the UN report PDF documents:
+```{r}
+frequent_terms <- findFreqTerms(UN_corpus.tdm, lowfreq = 100, highfreq = Inf)
+as.matrix(UN_corpus.tdm[frequent_terms,]) 
+```
+
+The total counts for the most frequent words can be saved into a matrix. The  sum function is subsequently applied across the rows:
+
+```{r}
+frequent_terms.tdm <- as.matrix(UN_corpus.tdm[frequent_terms,])
+sort(apply(frequent_terms.tdm, 1, sum), decreasing = TRUE)
+```
+
+# Document-term matrix
+NB: In a document-term matrix, rows represent documents in the collection and columns represent terms, whereas the term-document matrix is the transpose of DTM.
+Create document-term matrix:
+```{r}
+
+UN_corpus <- tm_map(UN_corpus, removePunctuation, ucp = TRUE)
+
+dtm = DocumentTermMatrix(UN_corpus,
+                         control = list(
+                                        stopwords = TRUE,
+                                        tolower = TRUE,
+                                        removeNumbers = TRUE,
+                                        stemming = TRUE,
+                                        bounds = list(global = c(3, Inf))))
+
+dtm <- dtm[, names(head(sort(colSums(as.matrix(dtm))), 400))]
+dtm <- dtm[, names(sort(colSums(as.matrix(dtm))))]
+
+inspect(dtm)
+```
+
+
+## TF-IDF
+Term frequency-inverse document frequency (TF-IDF):
+```{r}
+UN_dtm <- weightTfIdf(dtm, normalize = TRUE)
+dtm.matrix = as.matrix(UN_dtm)
+
+inspect(UN_dtm)
+```
+
+
+
+# Calculating Distance
+The clustering algorithm uses distances to cluster documents.
+
+## Euclidean distance
+Use the `dist` function (for matrix distance/ similarity computation) to calculate the Euclidean distance between the documents.
+```{r}
+UN_dtm <- as.matrix(UN_dtm)
+distMatrix_Euclidean <- dist(UN_dtm, method="euclidean")
+print(distMatrix_Euclidean)
+
+# NB: For continuous numerical values, use Euclidean distance
+```
+
+## Cosine distance
+Before performing any clustering measures, the cosine distance should be calculated to create a dist object (not a matrix).
+```{r}
+# For cosine similarity matrix
+cosine_matrix <- as.matrix(dtm)
+UN_cosine_sim <- cosine_matrix / sqrt(rowSums(cosine_matrix * cosine_matrix))
+UN_cosine_sim <- UN_cosine_sim %*% t(UN_cosine_sim)
+
+# Convert to distance matrix
+UN_cosine_sim <- as.dist(UN_cosine_sim)
+```
+
+__NB__: A cosine dissimilarity matrix can be generated to determine the extent to which the UN documents are different. This will not, however, be used for further analysis.
+```{r}
+#Generate cosine dissimilarity matrix (distance matrix)
+UN_cosine_dissimilarity <- as.dist(1 - UN_cosine_sim)
+```
+
+### Heat map
+The visualisation below presents a heat map of the cosine similarity of the UN corpus.
+```{r}
+UN_cosine_sim_heatmap <- as.matrix(UN_cosine_sim)
+
+heatmap(UN_cosine_sim_heatmap, 
+        main="Heatmap of cosine similarity")
+```
+
+
+
+# Clustering
+The R algorithm `hclust` will be used for agglomerative (bottom-up) hierarchical clustering based on the cosine distance. Hierarchical clustering is computationally inexpensive, as opposed to k-means clustering.
+Ward's method is used as the merge rule. Other methods, such as `ward.D2`, `single`, `complete`, `average`, `mcquitty`, `median`, or `centroid` can likewise be used.
+
+The tree can be cut into clusters. These can either be determined arbitrarily or based on one of three methods (the Elbow method, Average silhouette method or Gap statistic method). 
+```{r}
+library(dendextend)
+hclust_average <- hclust(UN_cosine_sim, method = "ward")
+
+average_dend_obj <- as.dendrogram(hclust_average)
+average_column_dend <- color_branches(average_dend_obj, k = 10, h = 10)
+plot(average_column_dend, 
+     main="Hierarchical clustering")
+```
+
+## Hierarchical clustering: "average" linkage method
+In hierarchical agglomerative cluster analysis (HAC, for short), there are numerous linkage methods that can be used to generate the different clusters. Another option would be `average`, as shown below.
+
+The following dendrogram is produced, whereby each data point eventually merges into a single cluster with the height (or distance) indicated on the y-axis. This uses the `dendextend` library.
+```{r}
+library(dendextend)
+hclust_average <- hclust(UN_cosine_sim, method = "average")
+
+average_dend_obj <- as.dendrogram(hclust_average)
+average_column_dend <- color_branches(average_dend_obj, k = 10, h = 10)
+plot(average_column_dend, 
+     main="Clustering 'average' method" )
+```
+
+## "Centroid" linkage method
+In hierarchical agglomerative cluster analysis (HAC, for short), there are numerous linkage methods that can be used to generate the different clusters. Another option would be `centroid`, as shown below.
+```{r}
+hclust_centroid <- hclust(UN_cosine_sim, method = "centroid")
+centroid_dend_obj <- as.dendrogram(hclust_centroid)
+centroid_column_dend <- color_branches(centroid_dend_obj, k = 12, h = 12)
+plot(centroid_column_dend, 
+     main="Clustering 'centroid' method")
+```
+
+## "Mcquitty" linkage method
+In hierarchical agglomerative cluster analysis (HAC, for short), there are numerous linkage methods that can be used to generate the different clusters. Another option would be `mcquitty`, as shown below.
+```{r}
+hclust_mcquitty <- hclust(UN_cosine_sim, method = "mcquitty")
+mcquitty_dend_obj <- as.dendrogram(hclust_mcquitty)
+mcquitty_column_dend <- color_branches(mcquitty_dend_obj, k = 15, h = 15)
+plot(mcquitty_column_dend, 
+     main="Clustering 'Mcquitty' method")
+```
+
+## Divisive hierarchical clustering
+Divisive hierarchical clustering is the inverse of hierarchical clustering since it starts off with one cluster containing the whole dataset. Subsequently, the observation with the highest average dissimilarity (in other words, the one farthest from the cluster according to a specific metric) is reassigned to its own cluster.
+It uses the `cluster` package and the `diana` (DIvisive ANAlysis) function.
+```{r}
+divisive_hclust <- diana(UN_cosine_sim, stand=TRUE)
+
+divisive_dend_obj <- as.dendrogram(divisive_hclust)
+divisive_column_dend <- color_branches(divisive_dend_obj, k = 15, h = 15)
+plot(divisive_column_dend, 
+     main="Divisive hierarchical clustering")
+```
+
+# LDA: Latent Dirichlet allocation
+Latent Dirichlet allocation is a topic modelling algorithm that is based on two guiding principles: 
++ Every document is a mixture of topics;
++ Every topic is a mixture of words.
+The package `topicmodels` is used for the LDA method.
+```{r}
+lda_text <- LDA(dtm, k=2, method = "VEM", control = NULL)
+lda_text
+```
+
+The 10 most common words in each group topic can be visualising using the `tidytext` Text Mining package. Thus, the "beta" method is used in order to extract the per-topic-per-word probabilities.
+```{r}
+lda_topics <- tidy(lda_text, matrix = "beta")
+lda_topics
+```
+
+The above tibble data frame can then be plotted.
+```{r}
+lda_top_terms <- lda_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n=10) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+lda_top_terms %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  labs(title="Top 10 most common terms per topic",
+        x ="Term", y = "LDA (beta)") +
+  theme(plot.title=element_text(color="coral4", size=16, face="bold.italic"),
+        axis.title.x = element_text(color="coral4", size=14, face="bold"),
+        axis.title.y = element_text(color="coral4", size=14, face="bold")) +
+  scale_fill_manual(values = c("lightgoldenrod4", "salmon")) +
+  geom_col(show.legend = TRUE) +
+  facet_wrap(~topic, scales="free_x") +
+  coord_flip() 
+```
+
+## LDA Log ratio
+The greatest difference in beta between the two topics can likewise be considered with the help of a log ratio.
+This analysis relies on the `tidyr` package.
+```{r}
+lda_logRatio <- lda_topics %>%
+  mutate(topic = paste0("topic", topic)) %>%
+  spread(topic, beta) %>%
+  filter(topic1 > 0.001 | topic2 > 0.001) %>% # filter for common words that have a beta greater than 1/1000 in at least 1 topic
+  mutate(log_ratio = log2(topic2 / topic1))
+
+lda_logRatio
+```
+The above tibble data frame can be plotted as follows:
+```{r}
+lda_logRatio %>%
+  group_by(direction = log_ratio > 0) %>%
+  top_n(15, abs(log_ratio)) %>%
+  ungroup() %>%
+  mutate(term = reorder(term, log_ratio)) %>%
+  ggplot(aes(term, log_ratio)) +
+  geom_col() +
+  labs(title = "Terms with greatest difference per topic",
+       y= "Log ratio of beta in topic 2 vs topic 1") +
+  theme(plot.title=element_text(color="navy", size=14, face="bold.italic"),
+        axis.title.x = element_text(color="navy", size=14, face="bold"),
+        axis.title.y = element_text(color="navy", size=14, face="bold")) +
+  scale_fill_manual(values = c("slateblue4", "gold2")) +
+  coord_flip()
+```
+
+## LDA Document-topic probabilities
+Latent Dirichlet Allocation can also model each UN General Assembly report (from 1991 to 2020) as a mixture of topics. In this case, the "gamma" method is used in order to extract the per-document-per-topic probabilities, in other words, it indicates the proportion of the document that consists of words from the assigned topic
+```{r}
+lda_documents <- tidy(lda_text, matrix ="gamma")
+lda_documents
+```
+
+Each of these values is an estimated proportion of words from the UN document that are generated from either topic. For instance, the model estimates that approximately 48% of the words in the UNGA report from 1991 were generated from topic 2.
+The tibble below demonstrates the top 5 UNGA reports per topic.
+```{r}
+top_n(lda_documents, 10)
+```
+
+A boxplot can illustrate how well the unsupervised learning algorithm distinguishes between the different topics for each of the UNGA reports.
+```{r}
+lda_documents %>%
+  mutate(title=reorder(document, gamma*topic)) %>%
+  ggplot(aes(factor(topic), gamma)) +
+  geom_boxplot(fill="gold", color="deeppink1") +
+  facet_wrap(~document)
+```
+
